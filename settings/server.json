@@ -1,0 +1,28 @@
+{
+  "properties": {
+    "baseUrl": {
+      "type": "string",
+      "title": "OpenAI-compatible URL",
+      "description": "Any OpenAI-compatible base URL or /chat/completions endpoint (for example http://127.0.0.1:8045/v1 or https://api.openai.com/v1).",
+      "default": "http://127.0.0.1:8045/v1"
+    },
+    "model": {
+      "type": "string",
+      "title": "Model",
+      "description": "Model name sent in the chat completions request.",
+      "default": "gemini-3.8-flash-low"
+    },
+    "apiKey": {
+      "type": "string",
+      "title": "API key",
+      "description": "Bearer token sent when no keychain secret is configured below. Clear this field if your server does not require authentication.",
+      "default": "sk-035fcf9af54b4e45af8de0f750784c56"
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "title": "Request timeout (seconds)",
+      "description": "HTTP timeout bounded to OpenIDEA's 60s task budget (5 to 58 seconds).",
+      "default": 55
+    }
+  }
+}

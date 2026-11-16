@@ -1,0 +1,51 @@
+{
+  "properties": {
+    "style": {
+      "type": "string",
+      "title": "Style",
+      "description": "conventional: type(scope): subject. plain: imperative subject. gitmoji: leading gitmoji plus subject.",
+      "enum": [
+        "conventional",
+        "plain",
+        "gitmoji"
+      ],
+      "default": "conventional"
+    },
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "Language of the generated commit message (defaults to 中文; Conventional Commits type/scope and code identifiers stay as-is while descriptions are written in Simplified Chinese).",
+      "default": "中文"
+    },
+    "body": {
+      "type": "string",
+      "title": "Body",
+      "description": "always: always include a structured bullet-list body after the subject line. auto: include a body unless trivial. never: subject line only.",
+      "enum": [
+        "always",
+        "auto",
+        "never"
+      ],
+      "default": "always"
+    },
+    "useDraft": {
+      "type": "boolean",
+      "title": "Use existing message box text as a hint",
+      "description": "When amending, the previous commit message is always included as context.",
+      "default": true
+    },
+    "instructions": {
+      "type": "string",
+      "title": "Extra instructions",
+      "description": "Optional rules appended to the prompt, for example preferred scopes or ticket format.",
+      "multiline": true,
+      "default": ""
+    },
+    "maxInputKb": {
+      "type": "integer",
+      "title": "Max model input (KB)",
+      "description": "Total prompt limit sent to the model (4 to 512 KB; default 150 KB, 1 KB = 1000 bytes). Git diffs are compacted, prioritized, and fairly truncated to stay within this limit.",
+      "default": 150
+    }
+  }
+}

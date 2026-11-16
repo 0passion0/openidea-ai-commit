@@ -1,0 +1,11 @@
+msrv = "1.85"
+avoid-breaking-exported-api = false
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 6
+max-fn-params-bools = 1
+max-struct-bools = 1
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+doc-valid-idents = ["OpenIDEA", "OpenAI", "KiB", "MiB"]
