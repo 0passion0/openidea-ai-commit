@@ -49,19 +49,16 @@ category = "AI Assistant"
 id = "translate"
 title = "Translate Selection (ZH <-> EN)"
 category = "AI Assistant"
-when = "editorFocus"
 
 [[contributes.commands]]
 id = "optimize-naming"
 title = "Optimize Variable Naming (Structured List)"
 category = "AI Assistant"
-when = "editorFocus"
 
 [[contributes.commands]]
 id = "replace-last-translation"
 title = "Replace Selection with Last Translation"
 category = "AI Assistant"
-when = "editorFocus"
 
 [[contributes.commands]]
 id = "copy-last-result"
@@ -80,14 +77,18 @@ command = "generate"
 [[contributes.menus]]
 menu = "editor.context"
 command = "translate"
-submenu = "AI Translate & Naming"
-when = "editorFocus"
 
 [[contributes.menus]]
 menu = "editor.context"
 command = "optimize-naming"
-submenu = "AI Translate & Naming"
-when = "editorFocus"
+
+[[contributes.menus]]
+menu = "tools"
+command = "translate"
+
+[[contributes.menus]]
+menu = "tools"
+command = "optimize-naming"
 
 [[contributes.keymaps]]
 command = "translate"
