@@ -1,0 +1,34 @@
+{
+  "properties": {
+    "completionEnabled": {
+      "type": "boolean",
+      "title": "Enable Python AI inline completion",
+      "description": "Opt in to sending bounded code context to the local Gemini companion. Requires the companion service and native editor inline completion to be enabled. Keys stay in the service environment.",
+      "default": false
+    },
+    "completionPort": {
+      "type": "integer",
+      "title": "Local completion service port",
+      "description": "Loopback only (127.0.0.1). Match AI_COMPLETION_PORT in the companion environment.",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 8765
+    },
+    "completionContextBytes": {
+      "type": "integer",
+      "title": "Maximum source context bytes",
+      "description": "Total UTF-8 bytes of prefix, suffix and source hints. Must not exceed AI_COMPLETION_CONTEXT_LIMIT in the companion environment.",
+      "minimum": 1024,
+      "maximum": 128000,
+      "default": 24000
+    },
+    "completionRequestTimeoutMs": {
+      "type": "integer",
+      "title": "Completion request deadline (ms)",
+      "description": "Includes the companion debounce and model response. Keep above AI_COMPLETION_DEBOUNCE + AI_COMPLETION_TIMEOUT.",
+      "minimum": 100,
+      "maximum": 180000,
+      "default": 12000
+    }
+  }
+}

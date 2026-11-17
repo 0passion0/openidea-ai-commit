@@ -1,0 +1,91 @@
+{
+  "properties": {
+    "translationDirection": {
+      "type": "string",
+      "group": "Translation",
+      "title": "Translation direction",
+      "description": "auto: Chinese -> English when text contains Chinese intent, otherwise English -> Chinese. en-to-zh / zh-to-en force one direction.",
+      "enum": [
+        "auto",
+        "en-to-zh",
+        "zh-to-en"
+      ],
+      "default": "auto"
+    },
+    "translationPresentation": {
+      "type": "string",
+      "group": "Translation",
+      "title": "Translation result presentation",
+      "description": "dialog-preview: show multiline editable dialog (OK replaces selection, Cancel keeps original and offers Copy/Replace notification actions). notify-actions: notification toast only. replace-directly: replace immediately.",
+      "enum": [
+        "dialog-preview",
+        "notify-actions",
+        "replace-directly"
+      ],
+      "default": "dialog-preview"
+    },
+    "autoCopyTranslationOnCancel": {
+      "type": "boolean",
+      "group": "Translation",
+      "title": "Auto-copy translation when dialog is cancelled",
+      "description": "Copies the translation to the clipboard automatically if you dismiss the preview dialog instead of replacing.",
+      "default": false
+    },
+    "includeCamelCase": {
+      "type": "boolean",
+      "group": "Variable Naming",
+      "title": "Include camelCase (小驼峰)",
+      "description": "Include lowerCamelCase style (for example userOrderAmount) in the structured Quick Pick list.",
+      "default": true
+    },
+    "includePascalCase": {
+      "type": "boolean",
+      "group": "Variable Naming",
+      "title": "Include PascalCase (大驼峰)",
+      "description": "Include UpperCamelCase style (for example UserOrderAmount) in the structured Quick Pick list.",
+      "default": true
+    },
+    "includeSnakeCase": {
+      "type": "boolean",
+      "group": "Variable Naming",
+      "title": "Include snake_case (下划线)",
+      "description": "Include lowercase underscore style (for example user_order_amount) in the structured Quick Pick list.",
+      "default": true
+    },
+    "includeScreamingSnakeCase": {
+      "type": "boolean",
+      "group": "Variable Naming",
+      "title": "Include SCREAMING_SNAKE_CASE (全大写常量)",
+      "description": "Include constant uppercase underscore style (for example USER_ORDER_AMOUNT) in the structured Quick Pick list.",
+      "default": true
+    },
+    "includeKebabCase": {
+      "type": "boolean",
+      "group": "Variable Naming",
+      "title": "Include kebab-case (短横线)",
+      "description": "Include hyphenated lowercase style (for example user-order-amount) in the structured Quick Pick list.",
+      "default": true
+    },
+    "namingCandidateCount": {
+      "type": "integer",
+      "group": "Variable Naming",
+      "title": "Naming candidate groups",
+      "description": "Number of distinct English semantic candidates requested from the model (1 to 5). Each expands into all enabled case styles.",
+      "default": 3
+    },
+    "copyOnPickNaming": {
+      "type": "boolean",
+      "group": "Variable Naming",
+      "title": "Also copy picked identifier to clipboard",
+      "description": "Copies the chosen identifier after replacing the selection in the editor.",
+      "default": false
+    },
+    "contextLines": {
+      "type": "integer",
+      "group": "General",
+      "title": "Surrounding context lines",
+      "description": "Number of lines before and after the selection sent to help infer code semantics and language conventions (0 to 15).",
+      "default": 3
+    }
+  }
+}

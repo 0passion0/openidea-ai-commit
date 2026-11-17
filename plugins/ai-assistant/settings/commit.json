@@ -40,12 +40,6 @@
       "description": "Optional rules appended to the prompt, for example preferred scopes or ticket format.",
       "multiline": true,
       "default": ""
-    },
-    "maxInputKb": {
-      "type": "integer",
-      "title": "Max model input (KB)",
-      "description": "Total prompt limit sent to the model (4 to 512 KB; default 150 KB, 1 KB = 1000 bytes). Git diffs are compacted, prioritized, and fairly truncated to stay within this limit.",
-      "default": 150
     }
   }
 }

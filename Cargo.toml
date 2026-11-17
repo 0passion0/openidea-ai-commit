@@ -1,30 +1,35 @@
-[package]
-name = "openidea-plugin-local-ai-commit"
-version = "0.2.0"
+[workspace]
+resolver = "3"
+members = [
+    "crates/ai-core",
+    "crates/ai-commit",
+    "crates/ai-code-helper",
+    "plugins/ai-assistant",
+]
+
+[workspace.package]
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-description = "One-shot OpenAI-compatible commit message plugin for OpenIDEA with git-diff optimization and 150 KB input bounding."
 publish = false
 
-# A plugin builds on its own (target wasm32-wasip2), outside any workspace.
-[workspace]
-
-[lib]
-crate-type = ["cdylib", "rlib"]
-
-[dependencies]
+[workspace.dependencies]
 openidea-plugin = { git = "https://github.com/l0ng-ai/openidea", tag = "v0.1.42" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ai-core = { path = "crates/ai-core" }
+ai-commit = { path = "crates/ai-commit" }
+ai-code-helper = { path = "crates/ai-code-helper" }
 
-[lints.rust]
+[workspace.lints.rust]
+unsafe_code = "forbid"
 missing_docs = "warn"
 
-[lints.rustdoc]
+[workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"

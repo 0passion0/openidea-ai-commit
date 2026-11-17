@@ -8,4 +8,17 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
-doc-valid-idents = ["OpenIDEA", "OpenAI", "KiB", "MiB"]
+doc-valid-idents = [
+    "OpenIDEA",
+    "OpenAI",
+    "KiB",
+    "MiB",
+    "UTF-16",
+    "UTF-8",
+    "JSON",
+    "camelCase",
+    "PascalCase",
+    "snake_case",
+    "SCREAMING_SNAKE_CASE",
+    "kebab-case",
+]

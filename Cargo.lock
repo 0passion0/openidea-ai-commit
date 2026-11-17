@@ -3,6 +3,35 @@
 version = 4
 
 [[package]]
+name = "ai-code-helper"
+version = "0.3.0"
+dependencies = [
+ "ai-core",
+ "openidea-plugin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ai-commit"
+version = "0.3.0"
+dependencies = [
+ "ai-core",
+ "openidea-plugin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ai-core"
+version = "0.3.0"
+dependencies = [
+ "openidea-plugin",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -105,11 +134,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "openidea-plugin-local-ai-commit"
-version = "0.2.0"
+name = "openidea-plugin-local-ai-assistant"
+version = "0.3.0"
 dependencies = [
+ "ai-code-helper",
+ "ai-commit",
+ "ai-core",
  "openidea-plugin",
- "serde",
  "serde_json",
 ]
 

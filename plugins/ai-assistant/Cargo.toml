@@ -1,0 +1,23 @@
+[package]
+name = "openidea-plugin-local-ai-assistant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Unified OpenIDEA plugin combining single-shot AI commit generation, editor selection translation (ZH <-> EN), structured variable naming optimization, and optional Python inline completion."
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ai-code-helper.workspace = true
+ai-commit.workspace = true
+ai-core.workspace = true
+openidea-plugin.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

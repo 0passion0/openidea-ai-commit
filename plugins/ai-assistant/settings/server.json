@@ -23,6 +23,12 @@
       "title": "Request timeout (seconds)",
       "description": "HTTP timeout bounded to OpenIDEA's 60s task budget (5 to 58 seconds).",
       "default": 55
+    },
+    "maxInputKb": {
+      "type": "integer",
+      "title": "Max model input (KB)",
+      "description": "Total prompt limit sent to the model across Commit and Translation/Naming features (4 to 512 KB; default 150 KB).",
+      "default": 150
     }
   }
 }

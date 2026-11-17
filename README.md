@@ -1,41 +1,30 @@
-# AI Commit for OpenIDEA
+# OpenIDEA AI Assistant (`local.ai-commit`)
 
-A streamlined, single-shot OpenIDEA plugin that generates commit messages from the changes selected in the Commit panel using **any OpenAI-compatible server**.
+A unified, lightweight Cargo Workspace producing a single OpenIDEA WebAssembly plugin (`plugins/ai-assistant`) with **one shared OpenAI-compatible server configuration**:
 
-## Key Features
+1. **AI Commit (`commit.message`)**: Single-shot Chinese Conventional Commits generator with git-diff compaction, tiered file prioritization, `<= 150 KB` input bounding, cancellable progress, stale draft protection, and pre-commit Conventional check.
+2. **Editor Selection Translation (`editor.context` › AI 翻译与命名 / `Alt+Shift+T`)**: Automatic Chinese <-> English translation preserving inline code identifiers, placeholders, and comment markers, shown in a lightweight multiline preview dialog (OK replaces selection; Cancel leaves source intact and offers **Copy** / **Replace** notification actions).
+3. **Variable Naming Optimization (`editor.context` › AI 翻译与命名 / `Alt+Shift+N`)**: Accepts Chinese phrases, imperfect English, Pinyin, or mixed phrases and opens a structured Quick Pick list across `camelCase`, `PascalCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, and `kebab-case` (plus a **Copy All Markdown** row).
+4. **Python Inline Completion (Optional)**: Opt-in `Providers::inline_completion` bridge to the local companion service in `plugins/ai-assistant/server/`.
 
-- **Commit toolbar button (`commit.message`)**: Places the AI Commit button directly above the commit message box (Commit tool window and Commit dialog).
-  - Shows a spinner on the button while generating (`indicatesRunning`).
-  - Opens a cancellable background task (`host::begin_task`) so you can cancel/stop an in-flight request from OpenIDEA's Background Tasks status bar or **Stop Background Processes**, aborting the HTTP call immediately without overwriting your draft.
-- **OpenAI-compatible only (single-shot)**: Direct HTTP `POST /chat/completions` (`stream: false`) with zero CLI agents or multi-turn loops.
-  - Default server: `http://127.0.0.1:8045/v1`
-  - Default model: `gemini-3.8-flash-low`
-  - Default API key: configurable in **Settings › Plugins › AI Commit › Server** or overridden securely via the **Secrets** (`api-key`) field.
-- **Git diff optimization & strict 150 KB cap**:
-  - Strips redundant git headers (`diff --git`, `index`, `---`, `+++`, mode headers, `\ No newline at end of file`).
-  - Classifies files (`Source` > `DocsAndTests` > `Deleted` > `LowSignal` such as lockfiles, minified assets, generated files, binaries).
-  - Compacts excessive context runs and long lines when diffs are large, and distributes remaining budget fairly across source files via water-filling so later files are never starved.
-  - Strictly keeps the total model input (`system + user`) within `150 KB` (`150,000` bytes by default).
-- **Structured Chinese Conventional Commits output**:
-  - Defaults to Simplified Chinese (`中文`) with mandatory detailed `- ` bullet-list body (`body = "always"`), producing `<type>(<scope>): <中文摘要>` plus concrete symbol/module/impact bullets.
-  - Normalizes full-width colons (`：` -> `: `), trailing periods on subject lines, `*` / `•` bullet markers to `- `, missing subject-body blank lines, `<think>` / `<thought>` tags, code fences, and response labels.
-- **Safe draft handling & Conventional Commits check**:
-  - Never overwrites edits typed while generating (`Error::Stale` surfaces **Insert anyway** and **Copy** actions).
-  - Strips `<think>...</think>` tags, code fences, labels, and outer quotes.
-  - Includes a before-commit **Conventional Commits message** check active when `style = "conventional"`.
+## Workspace Architecture
 
-## Build & Verify
+- `crates/ai-core`: Shared OpenAI-compatible HTTP client, URL parser, secret-redacted `AuthHeader`, notifications/clipboard UI helpers, and UTF-8/reasoning-tag sanitizer.
+- `crates/ai-commit`: Commit message domain crate.
+- `crates/ai-code-helper`: Editor selection translation, variable naming optimizer, and inline completion domain crate.
+- `plugins/ai-assistant`: Unified Wasm plugin package (`dist/plugin.wasm`).
 
-```sh
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo build --target wasm32-wasip2 --release
+## Build, Verify & Install in OpenIDEA
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --target wasm32-wasip2 -- -D warnings
+cargo test --workspace
+cargo doc --workspace --no-deps
+./scripts/build.ps1
 ```
 
-Copy `target/wasm32-wasip2/release/openidea_plugin_local_ai_commit.wasm` to `dist/plugin.wasm`, then link or pack with `openidea-plugin`:
+In OpenIDEA: **Settings › Plugins › ⚙ › Install Plugin from Disk...** and select:
 
-```sh
-openidea-plugin check
-openidea-plugin link
-```
+`d:\tmp\ai-commit-rust\plugins\ai-assistant`

@@ -5,7 +5,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::ServerConfig;
-use crate::prompt::PromptPayload;
+
+/// Bounded system + user message payload sent in a single `/chat/completions` call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptPayload {
+    /// System prompt instructions.
+    pub system: String,
+    /// User prompt content.
+    pub user: String,
+}
+
+impl PromptPayload {
+    /// Total UTF-8 byte size across system and user prompts.
+    #[must_use]
+    pub fn total_bytes(&self) -> usize {
+        self.system.len() + self.user.len()
+    }
+}
 
 #[derive(Serialize)]
 struct ChatCompletionRequest<'a> {
@@ -66,7 +82,11 @@ struct ApiErrorDetail {
 ///
 /// Returns [`Error::Cancelled`] when cancelled by the user/task, or [`Error::Failed`]
 /// on permission denial, HTTP error, invalid JSON, or empty model response.
-pub fn complete(server: &ServerConfig, prompt: &PromptPayload) -> Result<String, Error> {
+pub fn complete(
+    server: &ServerConfig,
+    prompt: &PromptPayload,
+    plugin_name: &str,
+) -> Result<String, Error> {
     let payload = ChatCompletionRequest {
         model: &server.model,
         messages: [
@@ -93,7 +113,7 @@ pub fn complete(server: &ServerConfig, prompt: &PromptPayload) -> Result<String,
     req.timeout_ms = Some(server.timeout_ms);
 
     let res = host::fetch(&req).map_err(|err| match err {
-        Error::Denied(_) => Error::Failed(server.endpoint.denied_message()),
+        Error::Denied(_) => Error::Failed(server.endpoint.denied_message(plugin_name)),
         other => other,
     })?;
 
@@ -110,12 +130,12 @@ pub fn complete(server: &ServerConfig, prompt: &PromptPayload) -> Result<String,
 /// # Errors
 ///
 /// Propagates any transport, permission, or API error from [`complete`].
-pub fn test_connection(server: &ServerConfig) -> Result<String, Error> {
+pub fn test_connection(server: &ServerConfig, plugin_name: &str) -> Result<String, Error> {
     let probe = PromptPayload {
         system: "Reply with one word.".to_owned(),
         user: "Reply with OK.".to_owned(),
     };
-    complete(server, &probe)
+    complete(server, &probe, plugin_name)
 }
 
 fn extract_api_error(status: u16, body: &str) -> Error {

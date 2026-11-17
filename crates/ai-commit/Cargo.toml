@@ -1,0 +1,20 @@
+[package]
+name = "ai-commit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Commit message domain library for OpenIDEA: git-diff optimization, 150 KB input bounding, Chinese Conventional Commits formatting, and commit checks."
+publish.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+ai-core.workspace = true
+openidea-plugin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

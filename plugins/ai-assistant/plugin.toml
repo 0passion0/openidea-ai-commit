@@ -1,0 +1,134 @@
+# OpenIDEA Plugin: AI Assistant (AI Commit + Selection Translate & Naming + Completion)
+id = "local.ai-commit"
+name = "AI Assistant"
+version = "0.3.0"
+description = "Unified OpenIDEA AI plugin: one-shot Chinese Conventional Commits generator (<=150 KB bounded), right-click selection translator (ZH <-> EN), structured variable naming optimizer, and optional Python inline completion."
+authors = ["local"]
+license = "MIT"
+change-notes = "0.3.0 — Merged AI Commit, Editor Selection Translator (ZH <-> EN), Structured Variable Naming Optimizer (camelCase, PascalCase, snake_case, SCREAMING_SNAKE_CASE, kebab-case), and Python Inline Completion into one unified plugin."
+categories = ["vcs", "ai", "tools"]
+icon = "icons/icon.svg"
+icon-dark = "icons/icon_dark.svg"
+engines.openidea = "^1.5"
+wasm = "dist/plugin.wasm"
+activation = ["on-command:*"]
+
+[capabilities]
+required = [
+    "vcs.read",
+    "vcs.write",
+    "editor.read",
+    "editor.write",
+    "clipboard",
+    "storage",
+    "net:127.0.0.1",
+    "net:ask",
+]
+optional = ["net:localhost", "secrets"]
+
+[[contributes.providers]]
+languages = ["python"]
+kinds = ["inline-completion"]
+
+[[contributes.commands]]
+id = "generate"
+title = "Generate Commit Message with AI"
+category = "AI Assistant"
+
+[[contributes.commands]]
+id = "insert"
+title = "Insert Last AI Commit Message"
+category = "AI Assistant"
+
+[[contributes.commands]]
+id = "copy"
+title = "Copy Last AI Commit Message"
+category = "AI Assistant"
+
+[[contributes.commands]]
+id = "translate"
+title = "Translate Selection (ZH <-> EN)"
+category = "AI Assistant"
+when = "editorFocus"
+
+[[contributes.commands]]
+id = "optimize-naming"
+title = "Optimize Variable Naming (Structured List)"
+category = "AI Assistant"
+when = "editorFocus"
+
+[[contributes.commands]]
+id = "replace-last-translation"
+title = "Replace Selection with Last Translation"
+category = "AI Assistant"
+when = "editorFocus"
+
+[[contributes.commands]]
+id = "copy-last-result"
+title = "Copy Last AI Translation or Naming Result"
+category = "AI Assistant"
+
+[[contributes.commands]]
+id = "test-connection"
+title = "Test AI Server Connection"
+category = "AI Assistant"
+
+[[contributes.menus]]
+menu = "commit.message"
+command = "generate"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "translate"
+submenu = "AI Translate & Naming"
+when = "editorFocus"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "optimize-naming"
+submenu = "AI Translate & Naming"
+when = "editorFocus"
+
+[[contributes.keymaps]]
+command = "translate"
+key = "Alt+Shift+T"
+
+[[contributes.keymaps]]
+command = "optimize-naming"
+key = "Alt+Shift+N"
+
+[[contributes.commitChecks]]
+id = "conventional"
+title = "Conventional Commits message"
+
+[[contributes.secrets]]
+name = "api-key"
+label = "OpenAI-compatible API key (keychain override)"
+description = "Optional keychain override sent as Bearer token. When unset, the API key in Server settings is used."
+
+[contributes.settings]
+title = "AI Assistant"
+
+[[contributes.settings.pages]]
+id = "general"
+title = "Translation & Naming"
+schema = "settings/general.json"
+
+[[contributes.settings.pages]]
+id = "commit"
+title = "Commit Message"
+schema = "settings/commit.json"
+
+[[contributes.settings.pages]]
+id = "completion"
+title = "AI Completion"
+schema = "settings/completion.json"
+
+[[contributes.settings.pages]]
+id = "server"
+title = "Server"
+schema = "settings/server.json"
+
+[[contributes.settings.pages.actions]]
+title = "Test connection"
+command = "test-connection"

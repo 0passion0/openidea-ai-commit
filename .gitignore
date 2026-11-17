@@ -1,6 +1,8 @@
-/target
-/dist
+target/
+plugins/*/dist/
+node_modules/
 /.openidea
 /.agents
 *.key
 *.oiplugin
+.env

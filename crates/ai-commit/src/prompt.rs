@@ -3,13 +3,16 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use ai_core::{
+    PromptPayload, cut_utf8, strip_reasoning_tags, unwrap_code_fence, unwrap_outer_quotes,
+};
 use openidea_plugin::{CommitChange, CommitDraft};
 
 use crate::config::{
     BodyMode, CommitStyle, DEFAULT_LANGUAGE, DraftUsage, PromptConfig, is_chinese_language,
 };
 use crate::conventional::TYPES;
-use crate::diff::{self, FileStats, FileTier, cut_utf8, relative_path, status_code};
+use crate::diff::{self, FileStats, FileTier, relative_path, status_code};
 
 /// Default Chinese system instruction sent to the OpenAI-compatible chat completions endpoint.
 pub const SYSTEM: &str = "你是一名严谨的资深研发工程师，负责根据 Git 变更清单与 diff 生成高质量、规范、详细的中文 Git Commit Message。\n\n\
@@ -47,23 +50,6 @@ const RESPONSE_LABELS: &[&str] = &[
     "生成的提交信息：",
     "生成的提交信息:",
 ];
-
-/// Complete system + user prompt pair bounded to the configured byte budget.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PromptPayload {
-    /// System prompt string.
-    pub system: String,
-    /// User prompt string containing rules, file summary, and optimized diff.
-    pub user: String,
-}
-
-impl PromptPayload {
-    /// Combined UTF-8 byte length of the model input strings.
-    #[must_use]
-    pub fn total_bytes(&self) -> usize {
-        self.system.len() + self.user.len()
-    }
-}
 
 /// Builds the single-shot prompt while keeping `system + user <= cfg.max_input_bytes`.
 #[must_use]
@@ -439,34 +425,14 @@ fn append_truncation_note(
 /// Cleans and normalizes model output into a uniform Git commit message.
 #[must_use]
 pub fn clean(answer: &str) -> String {
-    let normalized = answer.replace("\r\n", "\n");
-    let no_think = strip_tag_block(&normalized, "<think>", "</think>");
-    let no_thought = strip_tag_block(&no_think, "<thought>", "</thought>");
+    let no_reasoning = strip_reasoning_tags(answer);
 
-    let mut text = strip_leading_label(no_thought.trim());
+    let mut text = strip_leading_label(no_reasoning.trim());
     text = unwrap_code_fence(&text);
     text = strip_leading_label(&text);
     text = unwrap_outer_quotes(&text);
 
     normalize_commit_structure(&text)
-}
-
-fn strip_tag_block(input: &str, open_tag: &str, close_tag: &str) -> String {
-    let mut remaining = input;
-    let mut out = String::with_capacity(input.len());
-
-    while let Some(start) = remaining.find(open_tag) {
-        let (before, after_start) = remaining.split_at(start);
-        out.push_str(before);
-        if let Some(end) = after_start.find(close_tag) {
-            let after_end = end + close_tag.len();
-            remaining = after_start.get(after_end..).unwrap_or("");
-        } else {
-            return out;
-        }
-    }
-    out.push_str(remaining);
-    out
 }
 
 fn strip_leading_label(input: &str) -> String {
@@ -477,36 +443,6 @@ fn strip_leading_label(input: &str) -> String {
         }
     }
     trimmed.to_owned()
-}
-
-fn unwrap_code_fence(input: &str) -> String {
-    let trimmed = input.trim();
-    if !trimmed.starts_with("```") {
-        return trimmed.to_owned();
-    }
-    let mut lines: Vec<&str> = trimmed.lines().collect();
-    if !lines.is_empty() {
-        lines.remove(0);
-    }
-    if lines
-        .last()
-        .is_some_and(|line| line.trim_start().starts_with("```"))
-    {
-        lines.pop();
-    }
-    lines.join("\n").trim().to_owned()
-}
-
-fn unwrap_outer_quotes(input: &str) -> String {
-    let mut text = input.trim().to_owned();
-    for quote in ['"', '\'', '`'] {
-        if let Some(inner) = text.strip_prefix(quote).and_then(|s| s.strip_suffix(quote))
-            && !inner.contains(quote)
-        {
-            text = inner.trim().to_owned();
-        }
-    }
-    text
 }
 
 fn normalize_commit_structure(input: &str) -> String {

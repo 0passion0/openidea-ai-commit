@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 
+use ai_core::cut_utf8;
 use openidea_plugin::CommitChange;
 
 const MAX_COMPACT_LINE_BYTES: usize = 420;
@@ -194,19 +195,6 @@ fn is_docs_or_tests_path(rel_path: &str) -> bool {
         || file_name.contains("_test.")
         || file_name.contains(".test.")
         || file_name.contains(".spec.")
-}
-
-/// Truncates `text` to at most `max_bytes` on a UTF-8 character boundary.
-#[must_use]
-pub fn cut_utf8(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.get(..end).unwrap_or("")
 }
 
 /// Truncates `text` on a line boundary (falling back to a UTF-8 boundary) within `max_bytes`.
