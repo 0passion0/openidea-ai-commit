@@ -21,14 +21,15 @@ required = [
     "editor.write",
     "clipboard",
     "storage",
+    "project.read",
     "net:127.0.0.1",
     "net:ask",
 ]
-optional = ["net:localhost", "secrets", "project.read"]
+optional = ["net:localhost", "secrets"]
 
 [[contributes.providers]]
 languages = ["*"]
-kinds = ["completion", "inline-completion"]
+kinds = ["inline-completion"]
 
 [[contributes.commands]]
 id = "generate"
@@ -67,7 +68,17 @@ category = "AI Assistant"
 
 [[contributes.commands]]
 id = "smart-complete"
-title = "AI Smart Code Completion (Candidates)"
+title = "AI Smart Code Completion (Stream to File)"
+category = "AI Assistant"
+
+[[contributes.commands]]
+id = "accept-completion"
+title = "Accept AI Streamed Completion"
+category = "AI Assistant"
+
+[[contributes.commands]]
+id = "reject-completion"
+title = "Reject & Undo AI Streamed Completion"
 category = "AI Assistant"
 
 [[contributes.commands]]
@@ -80,6 +91,20 @@ menu = "commit.message"
 command = "generate"
 
 [[contributes.menus]]
+menu = "editor.title"
+command = "smart-complete"
+
+[[contributes.menus]]
+menu = "editor.title"
+command = "accept-completion"
+when = "plugin.local.ai-commit.pendingConfirm"
+
+[[contributes.menus]]
+menu = "editor.title"
+command = "reject-completion"
+when = "plugin.local.ai-commit.pendingConfirm"
+
+[[contributes.menus]]
 menu = "editor.context"
 command = "translate"
 
@@ -92,6 +117,16 @@ menu = "editor.context"
 command = "smart-complete"
 
 [[contributes.menus]]
+menu = "editor.context"
+command = "accept-completion"
+when = "plugin.local.ai-commit.pendingConfirm"
+
+[[contributes.menus]]
+menu = "editor.context"
+command = "reject-completion"
+when = "plugin.local.ai-commit.pendingConfirm"
+
+[[contributes.menus]]
 menu = "tools"
 command = "translate"
 
@@ -102,6 +137,14 @@ command = "optimize-naming"
 [[contributes.menus]]
 menu = "tools"
 command = "smart-complete"
+
+[[contributes.menus]]
+menu = "tools"
+command = "accept-completion"
+
+[[contributes.menus]]
+menu = "tools"
+command = "reject-completion"
 
 [[contributes.keymaps]]
 command = "translate"
@@ -114,6 +157,22 @@ key = "Alt+Shift+N"
 [[contributes.keymaps]]
 command = "smart-complete"
 key = "Alt+Shift+Space"
+
+[[contributes.keymaps]]
+command = "accept-completion"
+key = "Alt+Shift+Enter"
+
+[[contributes.keymaps]]
+command = "reject-completion"
+key = "Alt+Shift+Backspace"
+
+[[contributes.statusBar]]
+id = "ai-status"
+text = "✨ AI 补全: 就绪"
+tooltip = "点击触发 AI 智能流式补全 (Alt+Shift+Space) | 自动行内幽灵补全已开启 (Tab 确认)"
+command = "smart-complete"
+align = "right"
+priority = 120
 
 [[contributes.commitChecks]]
 id = "conventional"

@@ -1,9 +1,11 @@
-//! Fill-In-The-Middle prompt construction, overlap sanitization, and smart multi-candidate parsing.
+//! Fill-In-The-Middle prompt construction, overlap sanitization, and direct-stream prompt building.
 
 use ai_core::{PromptPayload, cut_utf8, strip_reasoning_tags};
-use serde::Deserialize;
 
-/// Cursor snapshot inputs used to build bounded FIM and candidate prompts.
+use super::align::cursor_state_rule;
+pub use super::align::{CursorLineState, classify_cursor_line, sanitize_and_align_fim};
+
+/// Cursor snapshot inputs used to build bounded FIM and streaming prompts.
 #[derive(Clone, Copy, Debug)]
 pub struct FimContext<'a> {
     /// File path of the active document.
@@ -59,6 +61,8 @@ pub fn build_fim_prompt(
             "Output the exact next logical statement or block (at most {max_lines} lines), matching the active indentation."
         ),
     };
+    let line_before = ctx.before.rsplit('\n').next().unwrap_or(ctx.before);
+    let state_rule = cursor_state_rule(line_before, ctx.after, ctx.language);
 
     let system = format!(
         "You are an ultra-precise code completion engine using Fill-In-The-Middle (FIM) inference.\n\
@@ -69,10 +73,59 @@ pub fn build_fim_prompt(
          2. Do NOT wrap output in Markdown code fences (```), <think> tags, quotes, or explanations.\n\
          3. Do NOT repeat code already present immediately before <|CURSOR|> or immediately after <|CURSOR|>.\n\
          4. Follow project types, variable names, and idioms visible in <CONTEXT>, <PREFIX>, and <SUFFIX>.\n\
-         5. {mode_rule}",
+         5. {mode_rule}{state_rule}",
         ctx.language, ctx.path
     );
 
+    assemble_fim_payload(system, ctx, "", max_input_bytes)
+}
+
+/// Builds a bounded prompt requesting a single high-quality completion ready for streaming into the file.
+#[must_use]
+pub fn build_direct_stream_prompt(
+    ctx: &FimContext<'_>,
+    selected_hint: &str,
+    max_lines: usize,
+    max_input_bytes: usize,
+) -> PromptPayload {
+    let line_before = ctx.before.rsplit('\n').next().unwrap_or(ctx.before);
+    let state_rule = cursor_state_rule(line_before, ctx.after, ctx.language);
+    let intent_rule = if selected_hint.trim().is_empty() {
+        String::new()
+    } else {
+        "\n7. <TARGET> shows the selected intent/stub; output the complete clean replacement code only."
+            .to_owned()
+    };
+
+    let system = format!(
+        "You are an ultra-precise software engineer generating production-ready code at <|CURSOR|>.\n\
+         Language: {}\n\
+         File: {}\n\n\
+         Strict rules:\n\
+         1. Output ONLY the single best raw code snippet to write directly into the file at <|CURSOR|> (no multiple options).\n\
+         2. Do NOT wrap output in Markdown code fences (```), <think> tags, quotes, or explanations.\n\
+         3. Do NOT repeat existing code immediately before or after <|CURSOR|>.\n\
+         4. Follow types, imports, style, and naming from <CONTEXT>, <PREFIX>, and <SUFFIX>.\n\
+         5. Keep output concise, complete, and well-indented (at most {} lines).{state_rule}{intent_rule}",
+        ctx.language,
+        ctx.path,
+        max_lines.max(1)
+    );
+
+    let hint_block = if selected_hint.trim().is_empty() {
+        String::new()
+    } else {
+        format!("<TARGET>\n{selected_hint}\n</TARGET>\n")
+    };
+    assemble_fim_payload(system, ctx, &hint_block, max_input_bytes)
+}
+
+fn assemble_fim_payload(
+    system: String,
+    ctx: &FimContext<'_>,
+    hint_block: &str,
+    max_input_bytes: usize,
+) -> PromptPayload {
     let budget = max_input_bytes.saturating_sub(system.len());
     let mut user = String::with_capacity(budget.min(8_192));
 
@@ -86,16 +139,18 @@ pub fn build_fim_prompt(
     let suffix_open = "<SUFFIX>\n";
     let suffix_close = "\n</SUFFIX>";
 
-    let fixed_overhead =
-        prefix_open.len() + prefix_close.len() + suffix_open.len() + suffix_close.len();
-    let available_body = budget.saturating_sub(fixed_overhead);
+    let overhead = prefix_open.len() + prefix_close.len() + suffix_open.len() + suffix_close.len();
+    let hint_slice = cut_utf8(hint_block, budget / 6);
+    let available = budget
+        .saturating_sub(overhead)
+        .saturating_sub(hint_slice.len());
 
-    let context_slice = cut_utf8(&context_block, available_body / 4);
-    let after_context = available_body.saturating_sub(context_slice.len());
+    let context_slice = cut_utf8(&context_block, available / 4);
+    let after_context = available.saturating_sub(context_slice.len());
     let suffix_slice = cut_utf8(ctx.after, after_context / 4);
-    let prefix_budget = after_context.saturating_sub(suffix_slice.len());
-    let prefix_slice = tail_utf8(ctx.before, prefix_budget);
+    let prefix_slice = tail_utf8(ctx.before, after_context.saturating_sub(suffix_slice.len()));
 
+    user.push_str(hint_slice);
     user.push_str(context_slice);
     user.push_str(prefix_open);
     user.push_str(prefix_slice);
@@ -143,6 +198,7 @@ pub fn sanitize_fim_output(
 }
 
 fn unwrap_fence_preserving_indent(input: &str) -> String {
+    let had_leading_nl = input.starts_with('\n') || input.starts_with("\r\n");
     let trimmed_start = input.trim_start_matches(['\n', '\r']);
     let Some(first_line_end) = trimmed_start.find('\n') else {
         let single = trimmed_start.trim_end();
@@ -153,12 +209,21 @@ fn unwrap_fence_preserving_indent(input: &str) -> String {
                 .unwrap_or("")
                 .to_owned();
         }
-        return single.to_owned();
+        return if had_leading_nl && !single.is_empty() {
+            format!("\n{single}")
+        } else {
+            single.to_owned()
+        };
     };
 
     let first_line = trimmed_start.get(..first_line_end).unwrap_or("").trim();
     if !first_line.starts_with("```") {
-        return trimmed_start.trim_end_matches(['\r', '\n']).to_owned();
+        let body = trimmed_start.trim_end_matches(['\r', '\n']);
+        return if had_leading_nl && !body.is_empty() {
+            format!("\n{body}")
+        } else {
+            body.to_owned()
+        };
     }
 
     let body = trimmed_start.get(first_line_end + 1..).unwrap_or("");
@@ -255,9 +320,16 @@ fn has_surplus_closers(text: &str, suffix: &str) -> bool {
 fn clamp_lines(text: &str, max_lines: usize) -> String {
     if max_lines == 1 {
         return text
+            .trim_start_matches(['\r', '\n'])
             .lines()
             .next()
             .unwrap_or("")
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
+    }
+    if let Some(rest) = text.strip_prefix('\n') {
+        let collected: Vec<&str> = rest.lines().take(max_lines).collect();
+        return format!("\n{}", collected.join("\n"))
             .trim_end_matches(['\r', '\n'])
             .to_owned();
     }
@@ -266,156 +338,6 @@ fn clamp_lines(text: &str, max_lines: usize) -> String {
         .join("\n")
         .trim_end_matches(['\r', '\n'])
         .to_owned()
-}
-
-/// Interactive multi-candidate suggestion for the `smart-complete` Quick Pick command.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SmartCandidate {
-    /// Concise summary displayed in Quick Pick (for example `1. Concise expression`).
-    pub label: String,
-    /// Short explanation of trade-offs or behavior.
-    pub description: String,
-    /// Code snippet ready to insert at the caret or replace the selection.
-    pub code: String,
-}
-
-#[derive(Deserialize)]
-struct SmartEnvelope {
-    #[serde(default)]
-    candidates: Vec<RawSmartCandidate>,
-}
-
-#[derive(Deserialize)]
-struct RawSmartCandidate {
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    code: String,
-}
-
-/// Builds a bounded prompt requesting 3 distinct smart code completion candidates as JSON.
-#[must_use]
-pub fn build_smart_candidates_prompt(
-    ctx: &FimContext<'_>,
-    selected_hint: &str,
-    max_input_bytes: usize,
-) -> PromptPayload {
-    let system = format!(
-        "You are an expert software architect providing Cursor-quality code completion candidates.\n\
-         Language: {}\n\
-         File: {}\n\n\
-         Reply ONLY with a single JSON object matching this exact schema:\n\
-         {{\"candidates\":[{{\"label\":\"short title\",\"description\":\"concise Chinese explanation\",\"code\":\"exact raw code to insert\"}}]}}\n\n\
-         Rules:\n\
-         1. Provide up to 3 distinct, high-value candidates ranked from most concise/idiomatic to complete implementation with edge-case handling.\n\
-         2. Match project types, indentation, naming, and style seen in <CONTEXT>, <PREFIX>, and <SUFFIX>.\n\
-         3. Do NOT repeat existing prefix/suffix code inside `code`.\n\
-         4. Output strict JSON only with NO <think> tags or markdown fences outside the JSON strings.",
-        ctx.language, ctx.path
-    );
-
-    let budget = max_input_bytes.saturating_sub(system.len());
-    let mut user = String::with_capacity(budget.min(8_192));
-
-    let hint_block = if selected_hint.trim().is_empty() {
-        String::new()
-    } else {
-        format!("<INTENT>\n{selected_hint}\n</INTENT>\n")
-    };
-    let context_block = if ctx.context.trim().is_empty() {
-        String::new()
-    } else {
-        format!("<CONTEXT>\n{}</CONTEXT>\n", ctx.context)
-    };
-    let prefix_open = "<PREFIX>\n";
-    let prefix_close = "<|CURSOR|></PREFIX>\n";
-    let suffix_open = "<SUFFIX>\n";
-    let suffix_close = "\n</SUFFIX>";
-
-    let overhead = hint_block.len()
-        + prefix_open.len()
-        + prefix_close.len()
-        + suffix_open.len()
-        + suffix_close.len();
-    let available = budget.saturating_sub(overhead);
-    let ctx_slice = cut_utf8(&context_block, available / 4);
-    let rem = available.saturating_sub(ctx_slice.len());
-    let suffix_slice = cut_utf8(ctx.after, rem / 4);
-    let prefix_slice = tail_utf8(ctx.before, rem.saturating_sub(suffix_slice.len()));
-
-    user.push_str(cut_utf8(&hint_block, budget));
-    user.push_str(ctx_slice);
-    user.push_str(prefix_open);
-    user.push_str(prefix_slice);
-    user.push_str(prefix_close);
-    user.push_str(suffix_open);
-    user.push_str(suffix_slice);
-    user.push_str(suffix_close);
-
-    PromptPayload { system, user }
-}
-
-/// Parses structured completion candidates from JSON or falls back to raw single-code sanitization.
-#[must_use]
-pub fn parse_smart_candidates(
-    raw: &str,
-    line_before_caret: &str,
-    after_caret: &str,
-    max_lines: usize,
-) -> Vec<SmartCandidate> {
-    let cleaned = strip_reasoning_tags(raw);
-    let json_text = unwrap_json_body(&cleaned);
-
-    if let Ok(env) = serde_json::from_str::<SmartEnvelope>(&json_text) {
-        let mut out = Vec::new();
-        for (idx, item) in env.candidates.into_iter().take(5).enumerate() {
-            let code = sanitize_fim_output(&item.code, line_before_caret, after_caret, max_lines);
-            if code.trim().is_empty() {
-                continue;
-            }
-            let label = item
-                .label
-                .or(item.title)
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| format!("方案 {}", idx + 1));
-            let description = item
-                .description
-                .map_or_else(|| "AI 推荐补全代码".to_owned(), |s| s.trim().to_owned());
-            out.push(SmartCandidate {
-                label,
-                description,
-                code,
-            });
-        }
-        if !out.is_empty() {
-            return out;
-        }
-    }
-
-    let fallback = sanitize_fim_output(raw, line_before_caret, after_caret, max_lines);
-    if fallback.trim().is_empty() {
-        return Vec::new();
-    }
-    vec![SmartCandidate {
-        label: "推荐补全".to_owned(),
-        description: "模型直接输出的代码补全".to_owned(),
-        code: fallback,
-    }]
-}
-
-fn unwrap_json_body(cleaned: &str) -> String {
-    let trimmed = cleaned.trim();
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
-        && start < end
-    {
-        return trimmed.get(start..=end).unwrap_or(trimmed).to_owned();
-    }
-    unwrap_fence_preserving_indent(trimmed)
 }
 
 #[cfg(test)]
@@ -461,15 +383,8 @@ mod tests {
         };
         let payload = build_fim_prompt(&ctx, FimMode::MultiLine { max_lines: 16 }, 8_000);
         assert!(payload.total_bytes() <= 8_000);
-        assert!(payload.user.contains("<PREFIX>"));
-        assert!(payload.user.contains("<SUFFIX>"));
-    }
-
-    #[test]
-    fn parses_smart_candidates_json_and_fallback() {
-        let raw = "<think>x</think>{\"candidates\":[{\"label\":\"简洁写法\",\"description\":\"直接返回求和\",\"code\":\"sum(items)\"}]}";
-        let list = parse_smart_candidates(raw, "return ", "\n", 16);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list.first().map(|c| c.code.as_str()), Some("sum(items)"));
+        let direct = build_direct_stream_prompt(&ctx, "return 0", 16, 8_000);
+        assert!(direct.total_bytes() <= 8_000);
+        assert!(direct.user.contains("<TARGET>"));
     }
 }

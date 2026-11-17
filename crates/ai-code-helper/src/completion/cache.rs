@@ -126,6 +126,54 @@ pub fn store(path: &str, line: u32, line_prefix: &str, suffix_head: &str, insert
     });
 }
 
+/// Stores an inline suggestion and pre-warms `line + 1` cache entries when `insert_text`
+/// starts with a newline (`\n`), enabling 0 ms lookup immediately after pressing `Enter`.
+pub fn store_with_newline_continuation(
+    path: &str,
+    line: u32,
+    line_prefix: &str,
+    after_caret: &str,
+    insert_text: &str,
+) {
+    let fp_same = suffix_fingerprint(after_caret);
+    store(path, line, line_prefix, &fp_same, insert_text);
+
+    let Some(after_nl) = insert_text
+        .strip_prefix("\r\n")
+        .or_else(|| insert_text.strip_prefix('\n'))
+    else {
+        return;
+    };
+    if after_nl.trim().is_empty() {
+        return;
+    }
+
+    let next_line = line.saturating_add(1);
+    let first_nl_line = after_nl.lines().next().unwrap_or(after_nl);
+    let indent_len = first_nl_line
+        .len()
+        .saturating_sub(first_nl_line.trim_start().len());
+    let next_indent = first_nl_line.get(..indent_len).unwrap_or("");
+    let body_after_indent = after_nl.strip_prefix(next_indent).unwrap_or(after_nl);
+
+    store(path, next_line, "", &fp_same, after_nl);
+    if !next_indent.is_empty() && !body_after_indent.trim().is_empty() {
+        store(path, next_line, next_indent, &fp_same, body_after_indent);
+    }
+
+    let after_next_line = after_caret
+        .strip_prefix("\r\n")
+        .or_else(|| after_caret.strip_prefix('\n'))
+        .unwrap_or(after_caret);
+    let fp_next = suffix_fingerprint(after_next_line);
+    if fp_next != fp_same {
+        store(path, next_line, "", &fp_next, after_nl);
+        if !next_indent.is_empty() && !body_after_indent.trim().is_empty() {
+            store(path, next_line, next_indent, &fp_next, body_after_indent);
+        }
+    }
+}
+
 /// Clears the completion cache (intended for unit tests and plugin deactivation).
 #[cfg(test)]
 pub fn clear() {
@@ -168,6 +216,38 @@ mod tests {
                 &fp
             )
             .is_none()
+        );
+        clear();
+    }
+
+    #[test]
+    fn prewarms_next_line_entries_for_newline_continuations() {
+        clear();
+        let after = "\n    return 0\n";
+        let fp = suffix_fingerprint(after);
+        store_with_newline_continuation(
+            "/repo/app.py",
+            2,
+            "def validate(user):",
+            after,
+            "\n    if not user:\n        return None",
+        );
+
+        assert_eq!(
+            lookup("/repo/app.py", 2, "def validate(user):", &fp).as_deref(),
+            Some("\n    if not user:\n        return None")
+        );
+        assert_eq!(
+            lookup("/repo/app.py", 3, "    ", &fp).as_deref(),
+            Some("if not user:\n        return None")
+        );
+        assert_eq!(
+            lookup("/repo/app.py", 3, "    if ", &fp).as_deref(),
+            Some("not user:\n        return None")
+        );
+        assert_eq!(
+            lookup("/repo/app.py", 3, "", &fp).as_deref(),
+            Some("    if not user:\n        return None")
         );
         clear();
     }

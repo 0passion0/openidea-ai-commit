@@ -39,6 +39,8 @@ impl Plugin for AiAssistant {
             }
             "copy-last-result" => ai_code_helper::run_copy_last_result(arg, PLUGIN_DISPLAY_NAME),
             "smart-complete" => ai_code_helper::run_smart_complete(ctx, PLUGIN_DISPLAY_NAME),
+            "accept-completion" => ai_code_helper::run_accept_completion(ctx),
+            "reject-completion" => ai_code_helper::run_reject_completion(ctx, PLUGIN_DISPLAY_NAME),
             "test-connection" => {
                 run_test_connection(ctx.project().as_ref(), PLUGIN_DISPLAY_NAME)?;
                 Ok(None)
@@ -244,15 +246,27 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: serde_json::json!({
-                    "choices": [{"message": {"content": "{\"candidates\":[{\"label\":\"Return incremented\",\"description\":\"返回加一\",\"code\":\"a + 1\"}]}"}}]
+                    "choices": [{"message": {"content": "```rust\na + 1\n```"}}]
                 })
                 .to_string()
                 .into_bytes(),
             })
         });
-        host.answer_next_prompt(Some(&["smart:0"]));
         AiAssistant
             .run_command("smart-complete", &host.invocation(), None)
+            .unwrap();
+        assert_eq!(host.editor_text(), "fn add(a: i32) -> i32 {\n    a + 1\n}");
+
+        AiAssistant
+            .run_command("reject-completion", &host.invocation(), None)
+            .unwrap();
+        assert_eq!(host.editor_text(), "fn add(a: i32) -> i32 {\n    \n}");
+
+        AiAssistant
+            .run_command("smart-complete", &host.invocation(), None)
+            .unwrap();
+        AiAssistant
+            .run_command("accept-completion", &host.invocation(), None)
             .unwrap();
         assert_eq!(host.editor_text(), "fn add(a: i32) -> i32 {\n    a + 1\n}");
     }

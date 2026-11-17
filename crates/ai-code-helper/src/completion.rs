@@ -1,28 +1,23 @@
-//! Cursor-grade multi-language Fill-In-The-Middle inline completion, PyCharm-style popup completion,
-//! companion bridge compatibility, and interactive multi-candidate smart completion.
+//! Cursor-grade multi-language Fill-In-The-Middle inline completion, newline continuation,
+//! companion bridge compatibility, and direct progressive in-file streaming completion.
 
+pub mod align;
 mod cache;
 mod catalog;
 mod context;
 pub mod fim;
 pub mod popup;
+pub mod stream;
 
 #[cfg(test)]
 mod tests;
 
-use ai_core::{
-    ServerConfig, complete as ai_complete, copy_to_clipboard, cut_utf8, notify, report_error,
-};
+use ai_core::{ServerConfig, complete as ai_complete, cut_utf8, report_error};
 use openidea_plugin::providers::{CompletionItem, Document, InlineSuggestion};
-use openidea_plugin::{
-    Error, HttpRequest, Invocation, LogLevel, NotificationAction, NotificationLevel, PickItem,
-    Position, Project, Range, host, text,
-};
+use openidea_plugin::{Error, HttpRequest, Invocation, LogLevel, Position, Range, host, text};
 use serde::{Deserialize, Serialize};
 
-use crate::selection::{ApplyOutcome, apply_replacement};
-
-const SMART_PICK_PREFIX: &str = "smart:";
+pub use stream::{run_accept_completion, run_reject_completion};
 
 #[derive(Serialize)]
 struct CompletionRequest<'a> {
@@ -173,10 +168,49 @@ fn complete_via_companion(doc: &Document, at: Position) -> Result<Option<InlineS
     }))
 }
 
+pub(crate) fn compute_replace_range(
+    at: Position,
+    after_caret: &str,
+    insert_text: &str,
+) -> Option<Range> {
+    let same_line_after = after_caret.split('\n').next().unwrap_or("").trim_end();
+    let is_closing_only = !same_line_after.is_empty()
+        && same_line_after
+            .chars()
+            .all(|ch| matches!(ch, ')' | ']' | '}' | ';' | ',' | '"' | '\'' | '`'));
+    if !is_closing_only || !insert_text.ends_with(same_line_after) {
+        return None;
+    }
+
+    let balance = |open: char, close: char| -> bool {
+        insert_text.chars().filter(|&c| c == close).count()
+            > insert_text.chars().filter(|&c| c == open).count()
+    };
+    let odd_quote = |q: char| -> bool { insert_text.chars().filter(|&c| c == q).count() % 2 == 1 };
+    let safe_to_replace = (same_line_after.contains(')') && balance('(', ')'))
+        || (same_line_after.contains(']') && balance('[', ']'))
+        || (same_line_after.contains('}') && balance('{', '}'))
+        || (same_line_after.contains('"') && odd_quote('"'))
+        || (same_line_after.contains('\'') && odd_quote('\''))
+        || (same_line_after.contains('`') && odd_quote('`'))
+        || same_line_after.chars().all(|c| matches!(c, ';' | ','));
+    if !safe_to_replace {
+        return None;
+    }
+
+    let utf16_len = align::utf16_len(same_line_after);
+    Some(Range::new(
+        at,
+        Position::new(at.line, at.character.saturating_add(utf16_len)),
+    ))
+}
+
 fn complete_via_openai(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Error> {
     if doc.language.trim().is_empty() {
         return Ok(None);
     }
+    stream::clear_stale_confirmation_on_edit(&doc.path, doc.version);
+
     let limit = parse_context_limit()?;
     let timeout = parse_timeout_ms()?;
     let max_lines = parse_max_lines();
@@ -189,9 +223,11 @@ fn complete_via_openai(doc: &Document, at: Position) -> Result<Option<InlineSugg
     let suffix_fp = cache::suffix_fingerprint(full_suffix);
 
     if let Some(cached) = cache::lookup(&doc.path, at.line, line_before, &suffix_fp) {
+        stream::update_inline_status(true);
+        let replace = compute_replace_range(at, full_suffix, &cached);
         return Ok(Some(InlineSuggestion {
             insert_text: cached,
-            replace: None,
+            replace,
         }));
     }
 
@@ -210,20 +246,24 @@ fn complete_via_openai(doc: &Document, at: Position) -> Result<Option<InlineSugg
     let prompt = fim::build_fim_prompt(&ctx, mode, limit.max(ai_core::MIN_MAX_INPUT_BYTES));
     let server = resolve_completion_server(Some(timeout))?;
 
+    let _task = host::begin_task("✨ AI 智能补全推理中...", false);
     let raw = ai_complete(&server, &prompt, "AI Assistant")?;
     let effective_lines = match mode {
         fim::FimMode::SingleLine => 1,
         fim::FimMode::MultiLine { max_lines: m } => m,
     };
-    let cleaned = fim::sanitize_fim_output(&raw, line_before, req.after, effective_lines);
+    let cleaned =
+        fim::sanitize_and_align_fim(&raw, line_before, req.after, &doc.language, effective_lines);
     if cleaned.trim().is_empty() {
         return Ok(None);
     }
 
-    cache::store(&doc.path, at.line, line_before, &suffix_fp, &cleaned);
+    cache::store_with_newline_continuation(&doc.path, at.line, line_before, full_suffix, &cleaned);
+    stream::update_inline_status(true);
+    let replace = compute_replace_range(at, req.after, &cleaned);
     Ok(Some(InlineSuggestion {
         insert_text: cleaned,
-        replace: None,
+        replace,
     }))
 }
 
@@ -241,18 +281,44 @@ fn resolve_completion_server(timeout_override: Option<u32>) -> Result<ServerConf
     Ok(server)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn empty_completion_sentinel() -> Option<InlineSuggestion> {
+    if host::setting_bool("completionEnabled").unwrap_or(false) {
+        Some(InlineSuggestion {
+            insert_text: String::new(),
+            replace: None,
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn empty_completion_sentinel() -> Option<InlineSuggestion> {
+    None
+}
+
 /// Computes an optional inline ghost-text completion suggestion across languages.
 #[must_use]
 pub fn inline_completion(doc: &Document, at: Position) -> Option<InlineSuggestion> {
     match complete(doc, at) {
-        Ok(suggestion) => suggestion,
-        Err(Error::Cancelled | Error::Stale) => None,
+        Ok(Some(suggestion)) => Some(suggestion),
+        Ok(None) => {
+            if host::setting_bool("completionEnabled").unwrap_or(false) {
+                stream::update_inline_status(false);
+            }
+            empty_completion_sentinel()
+        }
+        Err(Error::Cancelled | Error::Stale) => empty_completion_sentinel(),
         Err(_) => {
             host::log(
                 LogLevel::Warn,
                 "AI completion unavailable; check Server settings or the local completion service",
             );
-            None
+            if host::setting_bool("completionEnabled").unwrap_or(false) {
+                stream::update_inline_status(false);
+            }
+            empty_completion_sentinel()
         }
     }
 }
@@ -268,14 +334,14 @@ pub fn popup_completion(
     popup::provide_popup_completions(doc, at, trigger)
 }
 
-/// Runs the interactive multi-candidate AI Smart Code Completion command (`smart-complete`).
+/// Streams the single best AI completion directly into the editor file for in-place confirmation.
 ///
 /// # Errors
 ///
 /// Returns host errors only if reporting an error notification itself fails.
 pub fn run_smart_complete(ctx: &Invocation, plugin_name: &str) -> Result<Option<String>, Error> {
     let project = ctx.project();
-    if let Err(err) = execute_smart_complete(ctx, project.as_ref(), plugin_name) {
+    if let Err(err) = stream::execute_smart_complete(ctx, project.as_ref(), plugin_name) {
         report_error(
             project.as_ref(),
             "智能代码补全失败",
@@ -286,170 +352,4 @@ pub fn run_smart_complete(ctx: &Invocation, plugin_name: &str) -> Result<Option<
         )?;
     }
     Ok(None)
-}
-
-fn execute_smart_complete(
-    ctx: &Invocation,
-    project: Option<&Project>,
-    plugin_name: &str,
-) -> Result<(), Error> {
-    let editor = ctx
-        .editor()
-        .ok_or_else(|| Error::Failed("请先打开并聚焦一个代码编辑器。".to_owned()))?;
-    let doc = editor.document()?;
-    let path = editor.path();
-    let language = editor.language();
-    let selections = editor.selections()?;
-    let primary_range = selections
-        .first()
-        .copied()
-        .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
-
-    let start_offset = text::offset(&doc.text, primary_range.start)
-        .ok_or_else(|| Error::Failed("无法定位当前光标位置。".to_owned()))?;
-    let end_offset = text::offset(&doc.text, primary_range.end).unwrap_or(start_offset);
-
-    let prefix = doc.text.get(..start_offset).unwrap_or("");
-    let suffix = doc.text.get(end_offset..).unwrap_or("");
-    let selected_hint = if start_offset < end_offset {
-        doc.text.get(start_offset..end_offset).unwrap_or("")
-    } else {
-        ""
-    };
-
-    let limit = parse_context_limit().unwrap_or(24_000);
-    let max_lines = parse_max_lines();
-    let mut code_ctx = context::extract_code_context(
-        prefix,
-        &doc.text,
-        &path,
-        &language,
-        primary_range.start.line,
-        limit / 4,
-    );
-    let line_before = prefix.rsplit('\n').next().unwrap_or(prefix);
-    context::append_workspace_symbols(&mut code_ctx, &path, line_before, limit / 4);
-    let fim_ctx = fim::FimContext {
-        path: &path,
-        language: &language,
-        before: prefix,
-        after: suffix,
-        context: &code_ctx,
-    };
-    let prompt = fim::build_smart_candidates_prompt(
-        &fim_ctx,
-        selected_hint,
-        limit.max(ai_core::MIN_MAX_INPUT_BYTES),
-    );
-    let server = resolve_completion_server(None)?;
-
-    let task = host::begin_task("AI 正在生成多方案智能补全候选", true);
-    let input_kb = prompt.total_bytes().div_ceil(1_000);
-    task.report(
-        35,
-        Some(100),
-        Some(&format!("请求 {} ({input_kb} KB)...", server.model)),
-    );
-    if task.is_cancelled() {
-        return Err(Error::Cancelled);
-    }
-
-    let raw = ai_complete(&server, &prompt, plugin_name)?;
-    if task.is_cancelled() {
-        return Err(Error::Cancelled);
-    }
-
-    task.report(85, Some(100), Some("整理智能补全候选..."));
-    let candidates = fim::parse_smart_candidates(&raw, line_before, suffix, max_lines);
-    if candidates.is_empty() {
-        return Err(Error::Failed(
-            "未能从模型输出中提取有效的代码补全候选。".to_owned(),
-        ));
-    }
-
-    task.report(100, Some(100), None);
-    drop(task);
-
-    pick_and_apply_smart_candidate(
-        &editor,
-        project,
-        doc.version,
-        primary_range,
-        &candidates,
-        plugin_name,
-    )
-}
-
-fn pick_and_apply_smart_candidate(
-    editor: &openidea_plugin::TextEditor,
-    project: Option<&Project>,
-    doc_version: u64,
-    primary_range: Range,
-    candidates: &[fim::SmartCandidate],
-    plugin_name: &str,
-) -> Result<(), Error> {
-    let items: Vec<PickItem> = candidates
-        .iter()
-        .enumerate()
-        .map(|(idx, cand)| {
-            let preview = single_line_preview(&cand.code);
-            PickItem::new(
-                &format!("{SMART_PICK_PREFIX}{idx}"),
-                &format!("{}  |  {preview}", cand.label),
-            )
-            .description(&cand.description)
-        })
-        .collect();
-
-    let title = if primary_range.is_empty() {
-        "AI 智能代码补全 — 回车直接插入光标处"
-    } else {
-        "AI 智能代码补全 — 回车替换选中代码"
-    };
-    let Some(picked_key) = host::pick(title, &items)? else {
-        return Ok(());
-    };
-    let idx: usize = picked_key
-        .strip_prefix(SMART_PICK_PREFIX)
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| Error::Failed("无效的补全候选项。".into()))?;
-    let chosen = candidates
-        .get(idx)
-        .ok_or_else(|| Error::Failed("未找到所选补全候选项。".into()))?;
-
-    let _ = host::storage::set(crate::LAST_RESULT_KEY, &chosen.code);
-    match apply_replacement(editor, doc_version, &[primary_range], &chosen.code)? {
-        ApplyOutcome::Applied(_) | ApplyOutcome::Unchanged => Ok(()),
-        ApplyOutcome::Stale => {
-            let _ = copy_to_clipboard(&chosen.code, plugin_name);
-            notify(
-                project,
-                NotificationLevel::Warning,
-                "文档内容已修改，未插入补全（已复制到剪贴板）",
-                &single_line_preview(&chosen.code),
-                &[NotificationAction::new("复制补全结果", "copy-last-result")
-                    .argument(&chosen.code)],
-            )
-        }
-        ApplyOutcome::Denied => {
-            copy_to_clipboard(&chosen.code, plugin_name)?;
-            notify(
-                project,
-                NotificationLevel::Info,
-                "当前文件只读或未授权编辑，补全代码已复制到剪贴板",
-                &single_line_preview(&chosen.code),
-                &[],
-            )
-        }
-    }
-}
-
-fn single_line_preview(code: &str) -> String {
-    let first = code.lines().next().unwrap_or("").trim();
-    let short = cut_utf8(first, 64);
-    if code.contains('\n') || first.len() > short.len() {
-        format!("{short} …")
-    } else {
-        short.to_owned()
-    }
 }

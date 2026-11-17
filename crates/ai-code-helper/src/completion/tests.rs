@@ -231,15 +231,56 @@ fn openai_fim_works_across_languages_and_uses_zero_ms_prefix_cache() {
 }
 
 #[test]
-fn smart_complete_command_inserts_picked_candidate_at_cursor() {
+fn openai_fim_end_of_line_prewarms_newline_continuation_cache() {
+    cache::clear();
+    let host = MockHost::install().with_capabilities(&["net:127.0.0.1"]);
+    host.set_setting("completionEnabled", "true");
+    host.set_setting("completionBackend", "openai");
+    host.on_fetch(|_| {
+        Ok(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "return x + 1"
+                    }
+                }]
+            })
+            .to_string()
+            .into_bytes(),
+        })
+    });
+
+    let before_enter = doc("def calc(x):\n");
+    let eol = complete(&before_enter, Position::new(0, 12))
+        .unwrap()
+        .unwrap();
+    assert_eq!(eol.insert_text, "\n    return x + 1");
+    assert_eq!(host.requests().len(), 1);
+
+    let after_enter = doc("def calc(x):\n    \n");
+    let next_line = complete(&after_enter, Position::new(1, 4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(next_line.insert_text, "return x + 1");
+    assert_eq!(host.requests().len(), 1);
+    cache::clear();
+}
+
+#[test]
+fn smart_complete_command_streams_directly_with_accept_and_reject() {
+    cache::clear();
     let host = MockHost::install().with_capabilities(&[
         "editor.read",
         "editor.write",
+        "project.read",
         "clipboard",
         "storage",
         "net:127.0.0.1",
     ]);
     host.set_project_root(Some("/repo"));
+    host.set_setting("completionStreamChunkLines", "1");
     host.open_editor(
         "/repo/src/calc.py",
         "python",
@@ -253,7 +294,7 @@ fn smart_complete_command_inserts_picked_candidate_at_cursor() {
             body: serde_json::json!({
                 "choices": [{
                     "message": {
-                        "content": "{\"candidates\":[{\"label\":\"简洁求和\",\"description\":\"使用内置 sum\",\"code\":\"return sum(item.price for item in items)\"},{\"label\":\"带空值保护\",\"description\":\"判空后求和\",\"code\":\"if not items:\\n        return 0\\n    return sum(i.price for i in items)\"}]}"
+                        "content": "```python\ntotal = 0\nfor item in items:\n    total += item.price\nreturn total\n```"
                     }
                 }]
             })
@@ -261,11 +302,58 @@ fn smart_complete_command_inserts_picked_candidate_at_cursor() {
             .into_bytes(),
         })
     });
-    host.answer_next_prompt(Some(&["smart:0"]));
 
+    // Must stream directly without calling host::pick!
     run_smart_complete(&host.invocation(), "AI Assistant").unwrap();
+    let expected = "def total_price(items):\n    total = 0\n    for item in items:\n        total += item.price\n    return total";
+    assert_eq!(host.editor_text(), expected);
+
+    // Highlight decoration, status item, pendingConfirm context, and notification actions are set.
+    let decos = host.decorations();
+    assert!(decos.contains_key(&(
+        stream::STREAM_DECORATION_OWNER.to_owned(),
+        "/repo/src/calc.py".to_owned(),
+    )));
     assert_eq!(
-        host.editor_text(),
-        "def total_price(items):\n    return sum(item.price for item in items)"
+        host.context_keys().get(stream::PENDING_CONFIRM_CONTEXT_KEY),
+        Some(&openidea_plugin::ContextValue::Flag(true))
     );
+    let notices = host.project_notifications();
+    let actions: Vec<&str> = notices
+        .last()
+        .unwrap()
+        .1
+        .actions
+        .iter()
+        .map(|a| a.command.as_str())
+        .collect();
+    assert_eq!(actions, ["accept-completion", "reject-completion"]);
+
+    // Accepting clears pending state and keeps the code in the file.
+    run_accept_completion(&host.invocation()).unwrap();
+    assert_eq!(host.editor_text(), expected);
+    assert_eq!(
+        host.context_keys().get(stream::PENDING_CONFIRM_CONTEXT_KEY),
+        Some(&openidea_plugin::ContextValue::Flag(false))
+    );
+    assert!(host.decorations().is_empty());
+
+    // Stream again and verify reject safely rolls back to the original content.
+    cache::clear();
+    host.open_editor(
+        "/repo/src/calc.py",
+        "python",
+        "def total_price(items):\n    ",
+        &[(1, 4, 1, 4)],
+    );
+    run_smart_complete(&host.invocation(), "AI Assistant").unwrap();
+    assert_eq!(host.editor_text(), expected);
+
+    run_reject_completion(&host.invocation(), "AI Assistant").unwrap();
+    assert_eq!(host.editor_text(), "def total_price(items):\n    ");
+    assert_eq!(
+        host.context_keys().get(stream::PENDING_CONFIRM_CONTEXT_KEY),
+        Some(&openidea_plugin::ContextValue::Flag(false))
+    );
+    cache::clear();
 }

@@ -31,7 +31,15 @@
       "type": "boolean",
       "title": "Enable PyCharm-style instant popup completion",
       "description": "Provide sub-5ms local popup completions including cached AI predictions, in-file proximity symbols, and idioms.",
-      "default": true
+      "default": false
+    },
+    "completionStreamChunkLines": {
+      "type": "integer",
+      "title": "Streaming lines per step",
+      "description": "Number of lines written per progressive streaming step when inserting AI completion into the file.",
+      "minimum": 1,
+      "maximum": 16,
+      "default": 2
     },
     "completionPostfixEnabled": {
       "type": "boolean",
