@@ -5,7 +5,7 @@ export function validateInput(value) {
   const integer = number => Number.isSafeInteger(number) && number >= 0;
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       typeof value.path !== 'string' || !value.path ||
-      !/^(?:[A-Za-z]:[\\/]|\/)/.test(value.path) ||
+      !/^(?:[A-Za-z]:[\\/]|\/|\\\\[^\\/]+[\\/][^\\/]+)/.test(value.path) ||
       bytes(value.path) > 4096 ||
       typeof value.language !== 'string' || !value.language || bytes(value.language) > 64 ||
       !integer(value.version) ||

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from './server.js';
-import { buildPrompt, cleanCompletion } from './completion.js';
+import { buildPrompt, cleanCompletion, validateInput } from './completion.js';
 import { readConfig } from './config.js';
 
 const input = (overrides = {}) => ({
@@ -57,6 +57,10 @@ test('request rejects oversized path and language instead of prompt failure', as
     assert.equal((await f.post(input({ path: `C:\\${'x'.repeat(4100)}` }))).status, 400);
     assert.equal((await f.post(input({ language: 'x'.repeat(65) }))).status, 400);
   } finally { await f.close(); }
+});
+
+test('request accepts a Windows UNC absolute path', () => {
+  assert.equal(validateInput(input({ path: '\\\\server\\share\\example.rs' })), true);
 });
 
 test('HTTP validates input, origin and route; disabled mode does not call AI', async () => {

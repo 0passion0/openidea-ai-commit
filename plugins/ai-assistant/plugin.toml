@@ -24,11 +24,11 @@ required = [
     "net:127.0.0.1",
     "net:ask",
 ]
-optional = ["net:localhost", "secrets"]
+optional = ["net:localhost", "secrets", "project.read"]
 
 [[contributes.providers]]
-languages = ["python"]
-kinds = ["inline-completion"]
+languages = ["*"]
+kinds = ["completion", "inline-completion"]
 
 [[contributes.commands]]
 id = "generate"
@@ -66,6 +66,11 @@ title = "Copy Last AI Translation or Naming Result"
 category = "AI Assistant"
 
 [[contributes.commands]]
+id = "smart-complete"
+title = "AI Smart Code Completion (Candidates)"
+category = "AI Assistant"
+
+[[contributes.commands]]
 id = "test-connection"
 title = "Test AI Server Connection"
 category = "AI Assistant"
@@ -83,12 +88,20 @@ menu = "editor.context"
 command = "optimize-naming"
 
 [[contributes.menus]]
+menu = "editor.context"
+command = "smart-complete"
+
+[[contributes.menus]]
 menu = "tools"
 command = "translate"
 
 [[contributes.menus]]
 menu = "tools"
 command = "optimize-naming"
+
+[[contributes.menus]]
+menu = "tools"
+command = "smart-complete"
 
 [[contributes.keymaps]]
 command = "translate"
@@ -97,6 +110,10 @@ key = "Alt+Shift+T"
 [[contributes.keymaps]]
 command = "optimize-naming"
 key = "Alt+Shift+N"
+
+[[contributes.keymaps]]
+command = "smart-complete"
+key = "Alt+Shift+Space"
 
 [[contributes.commitChecks]]
 id = "conventional"

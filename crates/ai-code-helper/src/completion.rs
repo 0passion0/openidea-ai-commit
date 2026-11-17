@@ -1,8 +1,28 @@
-//! Native inline completion bridge to the loopback Gemini companion.
+//! Cursor-grade multi-language Fill-In-The-Middle inline completion, PyCharm-style popup completion,
+//! companion bridge compatibility, and interactive multi-candidate smart completion.
 
-use openidea_plugin::providers::{Document, InlineSuggestion};
-use openidea_plugin::{Error, HttpRequest, LogLevel, Position, host, text};
+mod cache;
+mod catalog;
+mod context;
+pub mod fim;
+pub mod popup;
+
+#[cfg(test)]
+mod tests;
+
+use ai_core::{
+    ServerConfig, complete as ai_complete, copy_to_clipboard, cut_utf8, notify, report_error,
+};
+use openidea_plugin::providers::{CompletionItem, Document, InlineSuggestion};
+use openidea_plugin::{
+    Error, HttpRequest, Invocation, LogLevel, NotificationAction, NotificationLevel, PickItem,
+    Position, Project, Range, host, text,
+};
 use serde::{Deserialize, Serialize};
+
+use crate::selection::{ApplyOutcome, apply_replacement};
+
+const SMART_PICK_PREFIX: &str = "smart:";
 
 #[derive(Serialize)]
 struct CompletionRequest<'a> {
@@ -21,14 +41,29 @@ struct Cursor {
     character: u32,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompanionResponse {
+    insert_text: String,
+}
+
 fn build_request(doc: &Document, at: Position, limit: usize) -> Option<CompletionRequest<'_>> {
     let offset = text::offset(&doc.text, at)?;
     let (prefix, suffix) = doc.text.split_at(offset);
-    let context = python_context(prefix, &doc.text, limit / 4);
-    let after = ai_core::cut_utf8(suffix, limit / 4);
-    let before_limit = limit - context.len() - after.len();
+    let context = context::extract_code_context(
+        prefix,
+        &doc.text,
+        &doc.path,
+        &doc.language,
+        at.line,
+        limit / 4,
+    );
+    let after = cut_utf8(suffix, limit / 4);
+    let before_limit = limit
+        .saturating_sub(context.len())
+        .saturating_sub(after.len());
     let mut start = prefix.len().saturating_sub(before_limit);
-    while !prefix.is_char_boundary(start) {
+    while start < prefix.len() && !prefix.is_char_boundary(start) {
         start += 1;
     }
     Some(CompletionRequest {
@@ -39,78 +74,17 @@ fn build_request(doc: &Document, at: Position, limit: usize) -> Option<Completio
             line: at.line,
             character: at.character,
         },
-        before: prefix.split_at(start).1,
+        before: prefix.get(start..).unwrap_or(prefix),
         after,
         context,
     })
 }
 
-fn is_scope(line: &str) -> bool {
-    line.starts_with("def ") || line.starts_with("async def ") || line.starts_with("class ")
+fn read_string_setting(key: &str) -> Option<String> {
+    host::setting_string(key).or_else(|| host::setting(key))
 }
 
-fn python_context<'a>(prefix: &'a str, source: &'a str, limit: usize) -> String {
-    let mut scopes: Vec<(usize, &str)> = Vec::new();
-    for line in prefix.lines() {
-        let code = line.trim_start();
-        if code.is_empty() || code.starts_with('#') {
-            continue;
-        }
-        let indent = line.len() - code.len();
-        while scopes.last().is_some_and(|(level, _)| *level >= indent) {
-            scopes.pop();
-        }
-        if is_scope(code) {
-            scopes.push((indent, line));
-        }
-    }
-
-    // Source hints only; semantic types and diagnostics remain owned by the native LSP.
-    let imports = source.lines().filter(|line| {
-        let code = line.trim_start();
-        code.starts_with("import ") || code.starts_with("from ")
-    });
-    let signatures = source.lines().filter(|line| is_scope(line.trim_start()));
-    let annotations = prefix.lines().rev().filter(|line| {
-        let code = line.trim_start();
-        code.contains(':') && !code.starts_with('#') && !is_scope(code)
-    });
-    let mut context = String::new();
-    for line in scopes
-        .into_iter()
-        .map(|(_, line)| line)
-        .chain(imports)
-        .chain(annotations)
-        .chain(signatures)
-    {
-        if line.len() < limit.saturating_sub(context.len())
-            && !context.lines().any(|existing| existing == line)
-        {
-            context.push_str(line);
-            context.push('\n');
-        }
-    }
-    context
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompletionResponse {
-    insert_text: String,
-}
-
-fn complete(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Error> {
-    if !host::setting_bool("completionEnabled").unwrap_or(false) || doc.language != "python" {
-        return Ok(None);
-    }
-    let port = host::setting("completionPort").map_or(Ok(8765), |value| {
-        value
-            .parse::<u16>()
-            .map_err(|_| Error::Invalid("Invalid completion port".into()))
-    })?;
-    if port == 0 {
-        return Err(Error::Invalid("Completion port must be positive".into()));
-    }
+fn parse_context_limit() -> Result<usize, Error> {
     let limit = host::setting("completionContextBytes").map_or(Ok(24_000), |value| {
         value
             .parse::<usize>()
@@ -121,6 +95,10 @@ fn complete(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Er
             "Completion context limit must be 1024–128000 bytes".into(),
         ));
     }
+    Ok(limit)
+}
+
+fn parse_timeout_ms() -> Result<u32, Error> {
     let timeout = host::setting("completionRequestTimeoutMs").map_or(Ok(12_000), |value| {
         value
             .parse::<u32>()
@@ -131,6 +109,44 @@ fn complete(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Er
             "Completion timeout must be 100–180000 milliseconds".into(),
         ));
     }
+    Ok(timeout)
+}
+
+fn parse_max_lines() -> usize {
+    host::setting_number("completionMaxLines").map_or(16, |n| {
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let clamped = n.clamp(1.0, 64.0) as usize;
+        clamped
+    })
+}
+
+fn complete(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Error> {
+    if !host::setting_bool("completionEnabled").unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let backend =
+        read_string_setting("completionBackend").unwrap_or_else(|| "companion".to_owned());
+    match backend.trim().to_ascii_lowercase().as_str() {
+        "openai" => complete_via_openai(doc, at),
+        _ => complete_via_companion(doc, at),
+    }
+}
+
+fn complete_via_companion(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Error> {
+    if doc.language != "python" {
+        return Ok(None);
+    }
+    let port = host::setting("completionPort").map_or(Ok(8765), |value| {
+        value
+            .parse::<u16>()
+            .map_err(|_| Error::Invalid("Invalid completion port".into()))
+    })?;
+    if port == 0 {
+        return Err(Error::Invalid("Completion port must be positive".into()));
+    }
+    let limit = parse_context_limit()?;
+    let timeout = parse_timeout_ms()?;
     let Some(payload) = build_request(doc, at, limit) else {
         return Ok(None);
     };
@@ -146,7 +162,7 @@ fn complete(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Er
             response.status
         )));
     }
-    let result: CompletionResponse = serde_json::from_slice(&response.body)
+    let result: CompanionResponse = serde_json::from_slice(&response.body)
         .map_err(|_| Error::Failed("Invalid completion service response".into()))?;
     if result.insert_text.trim().is_empty() {
         return Ok(None);
@@ -157,7 +173,75 @@ fn complete(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Er
     }))
 }
 
-/// Computes an optional inline completion suggestion from the local Gemini companion.
+fn complete_via_openai(doc: &Document, at: Position) -> Result<Option<InlineSuggestion>, Error> {
+    if doc.language.trim().is_empty() {
+        return Ok(None);
+    }
+    let limit = parse_context_limit()?;
+    let timeout = parse_timeout_ms()?;
+    let max_lines = parse_max_lines();
+
+    let Some(offset) = text::offset(&doc.text, at) else {
+        return Ok(None);
+    };
+    let (full_prefix, full_suffix) = doc.text.split_at(offset);
+    let line_before = full_prefix.rsplit('\n').next().unwrap_or(full_prefix);
+    let suffix_fp = cache::suffix_fingerprint(full_suffix);
+
+    if let Some(cached) = cache::lookup(&doc.path, at.line, line_before, &suffix_fp) {
+        return Ok(Some(InlineSuggestion {
+            insert_text: cached,
+            replace: None,
+        }));
+    }
+
+    let Some(mut req) = build_request(doc, at, limit) else {
+        return Ok(None);
+    };
+    context::append_workspace_symbols(&mut req.context, &doc.path, line_before, limit / 4);
+    let mode = fim::detect_fim_mode(req.after, max_lines);
+    let ctx = fim::FimContext {
+        path: req.path,
+        language: req.language,
+        before: req.before,
+        after: req.after,
+        context: &req.context,
+    };
+    let prompt = fim::build_fim_prompt(&ctx, mode, limit.max(ai_core::MIN_MAX_INPUT_BYTES));
+    let server = resolve_completion_server(Some(timeout))?;
+
+    let raw = ai_complete(&server, &prompt, "AI Assistant")?;
+    let effective_lines = match mode {
+        fim::FimMode::SingleLine => 1,
+        fim::FimMode::MultiLine { max_lines: m } => m,
+    };
+    let cleaned = fim::sanitize_fim_output(&raw, line_before, req.after, effective_lines);
+    if cleaned.trim().is_empty() {
+        return Ok(None);
+    }
+
+    cache::store(&doc.path, at.line, line_before, &suffix_fp, &cleaned);
+    Ok(Some(InlineSuggestion {
+        insert_text: cleaned,
+        replace: None,
+    }))
+}
+
+fn resolve_completion_server(timeout_override: Option<u32>) -> Result<ServerConfig, Error> {
+    let mut server = ServerConfig::from_host()?;
+    if let Some(timeout) = timeout_override {
+        server.timeout_ms = timeout.min(58_000);
+    }
+    if let Some(override_model) = read_string_setting("completionModel") {
+        let trimmed = override_model.trim();
+        if !trimmed.is_empty() {
+            trimmed.clone_into(&mut server.model);
+        }
+    }
+    Ok(server)
+}
+
+/// Computes an optional inline ghost-text completion suggestion across languages.
 #[must_use]
 pub fn inline_completion(doc: &Document, at: Position) -> Option<InlineSuggestion> {
     match complete(doc, at) {
@@ -166,177 +250,206 @@ pub fn inline_completion(doc: &Document, at: Position) -> Option<InlineSuggestio
         Err(_) => {
             host::log(
                 LogLevel::Warn,
-                "AI completion unavailable; check the local completion service and settings",
+                "AI completion unavailable; check Server settings or the local completion service",
             );
             None
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use openidea_plugin::HttpResponse;
-    use openidea_plugin::mock::MockHost;
-    use serde_json::Value;
+/// Generates fast local popup completion items (cached AI predictions, postfix templates,
+/// auto-imports, snippets, and in-file proximity symbols).
+#[must_use]
+pub fn popup_completion(
+    doc: &Document,
+    at: Position,
+    trigger: Option<&str>,
+) -> Vec<CompletionItem> {
+    popup::provide_popup_completions(doc, at, trigger)
+}
 
-    fn doc(text: &str) -> Document {
-        Document {
-            path: "/repo/app.py".into(),
-            language: "python".into(),
-            version: 7,
-            text: text.into(),
+/// Runs the interactive multi-candidate AI Smart Code Completion command (`smart-complete`).
+///
+/// # Errors
+///
+/// Returns host errors only if reporting an error notification itself fails.
+pub fn run_smart_complete(ctx: &Invocation, plugin_name: &str) -> Result<Option<String>, Error> {
+    let project = ctx.project();
+    if let Err(err) = execute_smart_complete(ctx, project.as_ref(), plugin_name) {
+        report_error(
+            project.as_ref(),
+            "智能代码补全失败",
+            "smart-complete",
+            err,
+            "重试",
+            "测试连接",
+        )?;
+    }
+    Ok(None)
+}
+
+fn execute_smart_complete(
+    ctx: &Invocation,
+    project: Option<&Project>,
+    plugin_name: &str,
+) -> Result<(), Error> {
+    let editor = ctx
+        .editor()
+        .ok_or_else(|| Error::Failed("请先打开并聚焦一个代码编辑器。".to_owned()))?;
+    let doc = editor.document()?;
+    let path = editor.path();
+    let language = editor.language();
+    let selections = editor.selections()?;
+    let primary_range = selections
+        .first()
+        .copied()
+        .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 0)));
+
+    let start_offset = text::offset(&doc.text, primary_range.start)
+        .ok_or_else(|| Error::Failed("无法定位当前光标位置。".to_owned()))?;
+    let end_offset = text::offset(&doc.text, primary_range.end).unwrap_or(start_offset);
+
+    let prefix = doc.text.get(..start_offset).unwrap_or("");
+    let suffix = doc.text.get(end_offset..).unwrap_or("");
+    let selected_hint = if start_offset < end_offset {
+        doc.text.get(start_offset..end_offset).unwrap_or("")
+    } else {
+        ""
+    };
+
+    let limit = parse_context_limit().unwrap_or(24_000);
+    let max_lines = parse_max_lines();
+    let mut code_ctx = context::extract_code_context(
+        prefix,
+        &doc.text,
+        &path,
+        &language,
+        primary_range.start.line,
+        limit / 4,
+    );
+    let line_before = prefix.rsplit('\n').next().unwrap_or(prefix);
+    context::append_workspace_symbols(&mut code_ctx, &path, line_before, limit / 4);
+    let fim_ctx = fim::FimContext {
+        path: &path,
+        language: &language,
+        before: prefix,
+        after: suffix,
+        context: &code_ctx,
+    };
+    let prompt = fim::build_smart_candidates_prompt(
+        &fim_ctx,
+        selected_hint,
+        limit.max(ai_core::MIN_MAX_INPUT_BYTES),
+    );
+    let server = resolve_completion_server(None)?;
+
+    let task = host::begin_task("AI 正在生成多方案智能补全候选", true);
+    let input_kb = prompt.total_bytes().div_ceil(1_000);
+    task.report(
+        35,
+        Some(100),
+        Some(&format!("请求 {} ({input_kb} KB)...", server.model)),
+    );
+    if task.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+
+    let raw = ai_complete(&server, &prompt, plugin_name)?;
+    if task.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+
+    task.report(85, Some(100), Some("整理智能补全候选..."));
+    let candidates = fim::parse_smart_candidates(&raw, line_before, suffix, max_lines);
+    if candidates.is_empty() {
+        return Err(Error::Failed(
+            "未能从模型输出中提取有效的代码补全候选。".to_owned(),
+        ));
+    }
+
+    task.report(100, Some(100), None);
+    drop(task);
+
+    pick_and_apply_smart_candidate(
+        &editor,
+        project,
+        doc.version,
+        primary_range,
+        &candidates,
+        plugin_name,
+    )
+}
+
+fn pick_and_apply_smart_candidate(
+    editor: &openidea_plugin::TextEditor,
+    project: Option<&Project>,
+    doc_version: u64,
+    primary_range: Range,
+    candidates: &[fim::SmartCandidate],
+    plugin_name: &str,
+) -> Result<(), Error> {
+    let items: Vec<PickItem> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, cand)| {
+            let preview = single_line_preview(&cand.code);
+            PickItem::new(
+                &format!("{SMART_PICK_PREFIX}{idx}"),
+                &format!("{}  |  {preview}", cand.label),
+            )
+            .description(&cand.description)
+        })
+        .collect();
+
+    let title = if primary_range.is_empty() {
+        "AI 智能代码补全 — 回车直接插入光标处"
+    } else {
+        "AI 智能代码补全 — 回车替换选中代码"
+    };
+    let Some(picked_key) = host::pick(title, &items)? else {
+        return Ok(());
+    };
+    let idx: usize = picked_key
+        .strip_prefix(SMART_PICK_PREFIX)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| Error::Failed("无效的补全候选项。".into()))?;
+    let chosen = candidates
+        .get(idx)
+        .ok_or_else(|| Error::Failed("未找到所选补全候选项。".into()))?;
+
+    let _ = host::storage::set(crate::LAST_RESULT_KEY, &chosen.code);
+    match apply_replacement(editor, doc_version, &[primary_range], &chosen.code)? {
+        ApplyOutcome::Applied(_) | ApplyOutcome::Unchanged => Ok(()),
+        ApplyOutcome::Stale => {
+            let _ = copy_to_clipboard(&chosen.code, plugin_name);
+            notify(
+                project,
+                NotificationLevel::Warning,
+                "文档内容已修改，未插入补全（已复制到剪贴板）",
+                &single_line_preview(&chosen.code),
+                &[NotificationAction::new("复制补全结果", "copy-last-result")
+                    .argument(&chosen.code)],
+            )
+        }
+        ApplyOutcome::Denied => {
+            copy_to_clipboard(&chosen.code, plugin_name)?;
+            notify(
+                project,
+                NotificationLevel::Info,
+                "当前文件只读或未授权编辑，补全代码已复制到剪贴板",
+                &single_line_preview(&chosen.code),
+                &[],
+            )
         }
     }
+}
 
-    #[test]
-    fn splits_at_utf16_caret_and_preserves_suffix_and_imports() {
-        let document =
-            doc("import pandas as pd\n\ndef process(df):\n    # 中文😀\n    \n    return df\n");
-        let request = build_request(&document, Position::new(4, 4), 2048).unwrap();
-        assert!(request.before.ends_with("# 中文😀\n    "));
-        assert_eq!(request.after, "\n    return df\n");
-        assert!(request.context.contains("import pandas as pd"));
-        assert!(request.context.contains("def process(df):"));
-        let unicode = doc("x = '😀'; ");
-        let request = build_request(&unicode, Position::new(0, 10), 2048).unwrap();
-        assert_eq!(request.before, unicode.text);
-        assert_eq!(request.after, "");
-    }
-
-    #[test]
-    fn bounds_total_code_context_and_keeps_both_caret_sides() {
-        let document = doc(&format!(
-            "{}\n    value = \n{}",
-            "# 中文😀\n".repeat(500),
-            "# 后文\n".repeat(500)
-        ));
-        let request = build_request(&document, Position::new(501, 12), 512).unwrap();
-        assert!(request.before.len() + request.after.len() + request.context.len() <= 512);
-        assert!(request.before.ends_with("    value = "));
-        assert!(request.after.starts_with('\n'));
-    }
-
-    #[test]
-    fn completion_is_opt_in_and_returns_ghost_without_editing() {
-        let host = MockHost::install().with_capabilities(&["net:127.0.0.1"]);
-        let document = doc("result = ");
-        assert!(complete(&document, Position::new(0, 9)).unwrap().is_none());
-        assert_eq!(host.requests().len(), 0);
-        host.set_setting("completionEnabled", "true");
-        host.on_fetch(|request| {
-            assert_eq!(request.url, "http://127.0.0.1:8765/v1/completion");
-            let body: Value = serde_json::from_slice(request.body.as_ref().unwrap()).unwrap();
-            assert_eq!(body["path"], "/repo/app.py");
-            assert_eq!(body["version"], 7);
-            assert_eq!(body["before"], "result = ");
-            assert_eq!(body["after"], "");
-            assert_eq!(body["position"]["character"], 9);
-            assert!(!body.to_string().contains("apiKey"));
-            Ok(HttpResponse {
-                status: 200,
-                headers: vec![],
-                body: br#"{"insertText":"process_data()"}"#.to_vec(),
-            })
-        });
-        let suggestion = complete(&document, Position::new(0, 9)).unwrap().unwrap();
-        assert_eq!(suggestion.insert_text, "process_data()");
-        assert!(suggestion.replace.is_none());
-        assert_eq!(document.text, "result = ");
-    }
-
-    #[test]
-    fn empty_and_failed_predictions_do_not_break_local_completion() {
-        let host = MockHost::install().with_capabilities(&["net:127.0.0.1"]);
-        host.set_setting("completionEnabled", "true");
-        host.on_fetch(|_| {
-            Ok(HttpResponse {
-                status: 200,
-                headers: vec![],
-                body: br#"{"insertText":""}"#.to_vec(),
-            })
-        });
-        assert!(inline_completion(&doc("x = "), Position::new(0, 4)).is_none());
-        host.on_fetch(|_| Err(Error::Cancelled));
-        assert!(inline_completion(&doc("x = "), Position::new(0, 4)).is_none());
-        host.on_fetch(|_| {
-            Ok(HttpResponse {
-                status: 429,
-                headers: vec![],
-                body: b"private upstream error".to_vec(),
-            })
-        });
-        assert!(inline_completion(&doc("x = "), Position::new(0, 4)).is_none());
-    }
-
-    #[test]
-    fn keeps_enclosing_class_and_annotations_when_prefix_is_truncated() {
-        let document = doc(&format!(
-            "import pandas as pd\nclass Processor:\n    def clean(self, df: pd.DataFrame) -> pd.DataFrame:\n        total: int = 1\n{}        ",
-            "        # long body 中文😀\n".repeat(100)
-        ));
-        let request = build_request(&document, Position::new(104, 8), 2048).unwrap();
-        assert!(!request.before.contains("class Processor"));
-        assert!(request.context.contains("class Processor:"));
-        assert!(
-            request
-                .context
-                .contains("def clean(self, df: pd.DataFrame) -> pd.DataFrame:")
-        );
-        assert!(request.context.contains("import pandas as pd"));
-        assert!(request.context.contains("total: int = 1"));
-        for limit in 0..32 {
-            let request = build_request(&document, Position::new(104, 8), limit).unwrap();
-            assert!(request.before.len() + request.after.len() + request.context.len() <= limit);
-        }
-    }
-
-    #[test]
-    fn preserves_multiline_insertion_whitespace_and_local_settings() {
-        let host = MockHost::install().with_capabilities(&["net:127.0.0.1"]);
-        host.set_setting("completionEnabled", "true");
-        host.set_setting("completionPort", "9000");
-        host.set_setting("completionRequestTimeoutMs", "15000");
-        host.on_fetch(|request| {
-            assert_eq!(request.url, "http://127.0.0.1:9000/v1/completion");
-            assert_eq!(request.timeout_ms, Some(15000));
-            Ok(HttpResponse {
-                status: 200,
-                headers: vec![],
-                body: br#"{"insertText":"    x = 1\n    return x\n"}"#.to_vec(),
-            })
-        });
-        let suggestion = complete(&doc("def f():\n"), Position::new(1, 0))
-            .unwrap()
-            .unwrap();
-        assert_eq!(suggestion.insert_text, "    x = 1\n    return x\n");
-    }
-
-    #[test]
-    fn rejects_invalid_settings_and_malformed_service_contract() {
-        let host = MockHost::install().with_capabilities(&["net:127.0.0.1"]);
-        host.set_setting("completionEnabled", "true");
-        host.set_setting("completionPort", "0");
-        assert!(matches!(
-            complete(&doc("x = "), Position::new(0, 4)),
-            Err(Error::Invalid(_))
-        ));
-        assert_eq!(host.requests().len(), 0);
-        host.set_setting("completionPort", "8765");
-        host.on_fetch(|_| {
-            Ok(HttpResponse {
-                status: 200,
-                headers: vec![],
-                body: br#"{"text":"bad contract"}"#.to_vec(),
-            })
-        });
-        assert!(matches!(
-            complete(&doc("x = "), Position::new(0, 4)),
-            Err(Error::Failed(_))
-        ));
-        let mut document = doc("x = ");
-        document.language = "rust".into();
-        assert!(complete(&document, Position::new(0, 4)).unwrap().is_none());
-        assert_eq!(host.requests().len(), 1);
+fn single_line_preview(code: &str) -> String {
+    let first = code.lines().next().unwrap_or("").trim();
+    let short = cut_utf8(first, 64);
+    if code.contains('\n') || first.len() > short.len() {
+        format!("{short} …")
+    } else {
+        short.to_owned()
     }
 }

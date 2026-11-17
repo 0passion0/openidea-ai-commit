@@ -2,8 +2,10 @@
 //!
 //! Provides bilingual translation (`ZH <-> EN`), structured variable naming
 //! optimization (`camelCase`, `PascalCase`, `snake_case`,
-//! `SCREAMING_SNAKE_CASE`, `kebab-case`), and optional Python inline
-//! completion ([`completion::inline_completion`]).
+//! `SCREAMING_SNAKE_CASE`, `kebab-case`), Cursor-grade inline completion
+//! ([`completion::inline_completion`]), PyCharm-style popup completion
+//! ([`completion::popup_completion`]), and interactive smart completion
+//! ([`run_smart_complete`]).
 
 pub mod completion;
 pub mod config;
@@ -11,6 +13,8 @@ pub mod naming;
 pub mod prompt;
 pub mod selection;
 pub mod translate;
+
+pub use completion::run_smart_complete;
 
 use ai_core::{ServerConfig, complete, copy_to_clipboard, cut_utf8, notify, report_error};
 use openidea_plugin::{

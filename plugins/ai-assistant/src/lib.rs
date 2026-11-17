@@ -12,7 +12,7 @@
 
 use ai_core::run_test_connection;
 use openidea_plugin::commit::{CommitChecks, CommitProblem};
-use openidea_plugin::providers::{Document, InlineSuggestion, Providers};
+use openidea_plugin::providers::{CompletionItem, Document, InlineSuggestion, Providers};
 use openidea_plugin::{CommitDraft, Error, Invocation, Plugin, Position, register_plugin};
 
 const PLUGIN_DISPLAY_NAME: &str = "AI Assistant";
@@ -38,6 +38,7 @@ impl Plugin for AiAssistant {
                 ai_code_helper::run_replace_last_translation(ctx, arg, PLUGIN_DISPLAY_NAME)
             }
             "copy-last-result" => ai_code_helper::run_copy_last_result(arg, PLUGIN_DISPLAY_NAME),
+            "smart-complete" => ai_code_helper::run_smart_complete(ctx, PLUGIN_DISPLAY_NAME),
             "test-connection" => {
                 run_test_connection(ctx.project().as_ref(), PLUGIN_DISPLAY_NAME)?;
                 Ok(None)
@@ -59,6 +60,15 @@ impl CommitChecks for AiAssistant {
 }
 
 impl Providers for AiAssistant {
+    fn completion(
+        &mut self,
+        doc: &Document,
+        at: Position,
+        trigger: Option<&str>,
+    ) -> Vec<CompletionItem> {
+        ai_code_helper::completion::popup_completion(doc, at, trigger)
+    }
+
     fn inline_completion(&mut self, doc: &Document, at: Position) -> Option<InlineSuggestion> {
         ai_code_helper::completion::inline_completion(doc, at)
     }
@@ -205,5 +215,45 @@ mod tests {
             .inline_completion(&doc, Position::new(1, 4))
             .unwrap();
         assert_eq!(suggestion.insert_text, "return 42");
+    }
+
+    #[test]
+    fn provider_popup_completion_and_smart_complete_work_across_languages() {
+        let host = MockHost::install().with_capabilities(ALL_CAPS);
+        let rs_doc = Document {
+            path: "/repo/src/lib.rs".into(),
+            language: "rust".into(),
+            version: 1,
+            text: "fn f(items: Vec<i32>) {\n    items.for\n}".into(),
+        };
+        let popup_items = AiAssistant.completion(&rs_doc, Position::new(1, 13), None);
+        assert!(
+            popup_items
+                .iter()
+                .any(|item| item.filter_text.as_deref() == Some("for"))
+        );
+
+        host.open_editor(
+            "/repo/src/lib.rs",
+            "rust",
+            "fn add(a: i32) -> i32 {\n    \n}",
+            &[(1, 4, 1, 4)],
+        );
+        host.on_fetch(|_| {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: serde_json::json!({
+                    "choices": [{"message": {"content": "{\"candidates\":[{\"label\":\"Return incremented\",\"description\":\"返回加一\",\"code\":\"a + 1\"}]}"}}]
+                })
+                .to_string()
+                .into_bytes(),
+            })
+        });
+        host.answer_next_prompt(Some(&["smart:0"]));
+        AiAssistant
+            .run_command("smart-complete", &host.invocation(), None)
+            .unwrap();
+        assert_eq!(host.editor_text(), "fn add(a: i32) -> i32 {\n    a + 1\n}");
     }
 }
